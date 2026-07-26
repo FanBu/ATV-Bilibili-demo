@@ -222,29 +222,40 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             Logger.info("[cdn] 用户已暂停，取消 host 切换")
             return
         }
-        guard let best = results.filter({ $0.mbps != nil }).max(by: { $0.mbps! < $1.mbps! }),
-              let bestMbps = best.mbps
-        else {
+        let ranked = results.filter { $0.mbps != nil }.sorted { ($0.mbps ?? -1) > ($1.mbps ?? -1) }
+        guard !ranked.isEmpty else {
             Logger.info("[cdn] 候选测速全部失败，保持 \(currentHost)")
             return
         }
-        guard best.host != currentHost else {
-            Logger.info("[cdn] 最快仍是当前 \(currentHost) (\(String(format: "%.1f", bestMbps))Mbps)，不切换")
+
+        // 优先更快的非当前节点；若短测速仍显示当前最快，则取第二名做强制尝试
+        let alternate = ranked.first(where: { $0.host != currentHost })
+        guard let target = alternate, let targetMbps = target.mbps else {
+            Logger.info("[cdn] 没有其他可用候选，保持 \(currentHost)")
             return
         }
-        // 和当前 host 的实测比，而不是和峰值 indicated 比（短测速几乎总能超过声明码率）
-        if let currentMbps = results.first(where: { $0.host == currentHost })?.mbps {
-            guard bestMbps > currentMbps * 1.3 else {
-                Logger.info("[cdn] 最快候选 \(best.host) (\(String(format: "%.1f", bestMbps))Mbps) 未明显快于当前 \(currentHost) (\(String(format: "%.1f", currentMbps))Mbps)，保持")
-                return
-            }
-        } else if requiredMbps > 0, bestMbps < requiredMbps {
-            Logger.info("[cdn] 最快候选 \(best.host) (\(String(format: "%.1f", bestMbps))Mbps) 低于流平均码率需求，保持 \(currentHost)")
+        if requiredMbps > 0, targetMbps < requiredMbps * 0.5 {
+            Logger.info("[cdn] 备选 \(target.host) (\(String(format: "%.1f", targetMbps))Mbps) 远低于流码率，放弃切换")
             return
         }
+
+        let currentMbps = ranked.first(where: { $0.host == currentHost })?.mbps
+        let reason: String
+        if let currentMbps, targetMbps > currentMbps * 1.3 {
+            reason = "测速明显更快"
+        } else if let currentMbps, targetMbps >= currentMbps * 0.7 {
+            // 短测速乐观且接近时，当前节点已真实卡顿，强制换一个试试
+            reason = "测速接近但已卡顿，强制尝试"
+        } else if currentMbps == nil {
+            reason = "当前节点测速失败"
+        } else {
+            Logger.info("[cdn] 备选 \(target.host) (\(String(format: "%.1f", targetMbps))Mbps) 明显慢于当前 \(currentHost) (\(String(format: "%.1f", currentMbps!))Mbps)，保持")
+            return
+        }
+
         lastHostSwitchAt = Date()
-        Logger.info("[cdn] 切换 host: \(currentHost) -> \(best.host) (实测\(String(format: "%.1f", bestMbps))Mbps)")
-        await switchHost(to: best.host)
+        Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, \(reason))")
+        await switchHost(to: target.host)
     }
 
     @MainActor
